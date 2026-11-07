@@ -13,12 +13,12 @@ New ideas go in the **Parking lot**, not into the current phase.
 - [x] Project name: GLYPHRIFT (still verify PyPI, GitHub, npm, domain, USPTO before publishing)
 - [x] Choose a license: MIT, copyright "Void Core" (`LICENSE` file written)
 - [x] `git init`; `pyproject.toml`; `src/` skeleton; pytest + ruff; GitHub Actions CI. Verified: local `uv sync`/`pytest`/`ruff` pass on Windows; CI run #1 on `main` is green; pushed to github.com/Void-Core25/glyphrift (public)
-- [ ] **<- NEXT** Pick 5 eval repos and pin commit hashes (chosen: `click`, `requests`, `flask`, `rich`, `httpx`; run `scripts/pin_eval_repos.ps1` and record hashes in `docs/eval-repos.md`)
-- [ ] Rough sketch of the main UI screen (paper is fine)
+- [x] Pick 5 eval repos and pin commit hashes (see `docs/eval-repos.md`) (chosen: `click`, `requests`, `flask`, `rich`, `httpx`; run `scripts/pin_eval_repos.ps1` and record hashes in `docs/eval-repos.md`)
+- [ ] (Optional, may skip) Rough sketch of the main UI screen (paper is fine)
 
 **Exit:** `uv run pytest` passes on the empty skeleton in CI; name, license and eval repos decided.
 
-**Phase 0 status (2026-11-08):** 3 of 5 items done. Remaining: eval repos (needed), UI sketch (optional, may skip).
+**Phase 0 status (2026-11-08):** all required items done. Only the optional UI sketch remains; Phase 1 can start.
 
 ## Phase 1: Indexer and evaluation harness (about 2 weeks)
 
