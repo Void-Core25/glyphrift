@@ -113,6 +113,8 @@ def test_skips_default_directories(tmp_path: Path, use_git: bool) -> None:
     write(tmp_path, "src/app.py")
     write(tmp_path, ".venv/lib/site.py")
     write(tmp_path, "venv/lib/site.py")
+    write(tmp_path, "lib/dist-packages/pkg.py")
+    write(tmp_path, "lib/site-packages/pkg.py")
     write(tmp_path, "node_modules/pkg/index.js")
     write(tmp_path, "src/__pycache__/app.cpython-312.pyc", b"\x00")
     write(tmp_path, "build/out.py")

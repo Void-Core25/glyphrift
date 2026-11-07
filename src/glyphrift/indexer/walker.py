@@ -45,6 +45,7 @@ DEFAULT_SKIP_DIRS: frozenset[str] = frozenset(
         ".ruff_cache",
         ".eggs",
         "site-packages",
+        "dist-packages",
         "build",
         "dist",
     }

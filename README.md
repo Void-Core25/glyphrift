@@ -189,14 +189,15 @@ uv run glyphrift pr-check --base <ref> --head <ref>
 
 *(Update at the end of every session.)*
 
-- Phase: **1, Indexer and evaluation harness** (2 of 10 items done)
+- Phase: **1, Indexer and evaluation harness** (3 of 10 items done)
 - Done in Phase 0: name (GLYPHRIFT), license (MIT, "Void Core"), skeleton, CI (green), eval repos pinned in `docs/eval-repos.md`. Repo is public at github.com/Void-Core25/glyphrift
 - Done in Phase 1:
-  - File walker (`indexer/walker.py`). Verified on the user's Windows machine and CI.
-  - SQLite schema + migrations (`store/migrations.py`, `store/db.py`). Verified in Claude's sandbox only: ruff clean, pytest 40 passed / 1 skipped (CLI test skipped there because typer is not installed). NOT yet run on the user's Windows machine or in CI
-- Next: `ast` extraction (modules, classes, functions, methods, line ranges) into the `symbols` table
+  - File walker (`indexer/walker.py`) and SQLite schema + migrations (`store/`). Verified on the user's Windows machine and CI (40 passed, 1 skipped)
+  - `ast` symbol extraction (`indexer/extract.py`) and `index_repo` (`indexer/pipeline.py`) storing files + symbols; demo `scripts/show_symbols.py <repo> [--file REL_PATH] [--errors]`. Verified in Claude's sandbox only: ruff clean, pytest 90 passed / 1 skipped; indexed the Python 3.13 standard library (538 files, 16,303 symbols) in 1.5 s with 0 parse failures. NOT yet run on the user's Windows machine or in CI
+- Next: import extraction + import resolver (absolute, relative, packages, `__init__`, `from x import *`), producing `imports` edges
+- Not yet done: any edges (imports/calls/inherits), the `glyphrift index` CLI command, eval harness and ground truth
 - Open: user to confirm PyPI/GitHub/npm/domain/USPTO name checks before publishing a release
-- Working notes: user is on Windows (PowerShell) with `uv`. Claude's sandbox has no network for installs and cannot clone GitHub repos, so anything needing new packages or the eval repos must be run by the user locally (or the user pastes output). Zip downloads do not include `.git`. Windows gotcha already hit once: `Path.write_text` converts `\n` to `\r\n`; tests that compare byte sizes must write bytes
+- Working notes: user is on Windows (PowerShell) with `uv`. Claude's sandbox has no network for installs and cannot clone GitHub repos, so anything needing new packages or the eval repos must be run by the user locally (or the user pastes output). Zip downloads do not include `.git`. Windows gotcha already hit once: `Path.write_text` converts `\n` to `\r\n`; tests that compare byte sizes must write bytes. The parser only understands the grammar of the Python running GLYPHRIFT, so run the eval harness under one recent Python (3.12+) for comparable results
 
 ## Decisions log
 
@@ -209,6 +210,9 @@ uv run glyphrift pr-check --base <ref> --head <ref>
 - 2026-11-07: Every edge carries a confidence label; this is the core of the evidence principle.
 - 2026-11-07: License: MIT, copyright "Void Core". Free, simple, compatible with all planned dependencies; no need for a stricter license on a portfolio project.
 - 2026-11-07: Skeleton uses hatchling build backend, `src/` layout, ruff (E,F,I,UP,B; line length 100), pytest with `pythonpath=src`, CI matrix Python 3.11-3.13 via uv. CLI test uses `importorskip` so it skips where typer is absent.
+- 2026-11-08: Symbol extraction rules: one `module` symbol per file, always first, even when parsing fails (file gets `parse_error`, nothing raised); definitions inside if/try/with/for/while/match belong to the enclosing scope; a function directly in a class body is a `method`, otherwise a `function`; qualified names are plain dotted (`pkg.mod.outer.inner`, no `<locals>`) and not unique; a decorated definition starts at its first decorator (so Track B can map changed decorator lines to the right symbol). The walk is iterative so deep nesting cannot overflow the stack. Source is parsed from bytes so encoding declarations and BOMs work; parser SyntaxWarnings/DeprecationWarnings are suppressed (old code is full of invalid escapes).
+- 2026-11-08: Module names: start at the outermost directory of the unbroken chain of packages (dirs with `__init__.py`/`.pyi`) containing the file, so `src/pkg/mod.py` is `pkg.mod` and `tests/unit/test_x.py` is `test_x`. Namespace packages (no `__init__.py`) are not recognised. Revisit when the import resolver needs source roots.
+- 2026-11-08: `index_repo` stores only files with a supported language (Python); re-indexes a file when its sha256 or its computed module name changed (adding an `__init__.py` renames sibling modules); removes vanished/now-ignored files; whole run is one transaction. Symbols only so far; when edges exist it must also re-index dependants of changed files. `dist-packages` added to default skipped dirs.
 - 2026-11-08: Schema v1 added beyond the original sketch: `files.parse_error` (record unparseable files instead of failing), `findings.severity` values (`info|low|medium|high`), CHECK constraints on enums, line ranges and `json_valid(evidence_json)`, and the invariant `(confidence = 'unresolved') = (dst_symbol_id IS NULL)` so an edge can never claim to be resolved without a target. All FKs cascade, including `edges.dst_symbol_id` (dangling edges are impossible; dependants must be re-indexed). Migrations are Python strings versioned by `PRAGMA user_version`, each applied atomically with its version bump; no ORM and no migration library. Connections: autocommit mode, foreign keys on, WAL for file databases, `transaction()` helper for grouped writes.
 - 2026-11-08: File walker uses `git ls-files --cached --others --exclude-standard` in git repos so `.gitignore` semantics are exactly git's, with no new dependency (the `pathspec` library was the alternative). Fallback tree walk does not interpret `.gitignore` (documented). Default skipped dirs include `build` and `dist`; overridable via `skip_dirs`. Symlinks are never followed. Unreadable files are skipped with a logged warning.
 - 2026-11-08: Eval repo commits pinned (see docs/eval-repos.md). Phase 0 required items complete.

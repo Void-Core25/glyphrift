@@ -26,8 +26,8 @@ Goal: reliably extract Python structure, and be able to *measure* correctness.
 
 - [x] File walker: respects `.gitignore` (via `git ls-files` in git repos; plain tree walk fallback without `.gitignore` support), skips venvs/build dirs, never follows symlinks, records size + sha256 + language (`src/glyphrift/indexer/walker.py`, 15 tests)
 - [x] SQLite schema + migrations (`files`, `symbols`, `edges`, `findings`): `src/glyphrift/store/` (`migrations.py`, `db.py`; versioned via `PRAGMA user_version`, atomic migrations, 21 tests)
-- [ ] **<- NEXT** `ast` extraction: modules, classes, functions, methods, line ranges
-- [ ] Import extraction + **import resolver** (absolute, relative, packages, `__init__`, `from x import *`)
+- [x] `ast` extraction: modules, classes, functions, methods, line ranges (`indexer/extract.py`), plus `indexer/pipeline.py` (`index_repo`: walks, extracts, stores files + symbols; re-indexes only changed files) and `scripts/show_symbols.py` demo
+- [ ] **<- NEXT** Import extraction + **import resolver** (absolute, relative, packages, `__init__`, `from x import *`)
 - [ ] Call extraction with confidence labels (`resolved` / `inferred` / `heuristic` / `unresolved`)
 - [ ] Inheritance edges; `self.method()` resolution through class hierarchy
 - [ ] Graceful handling of syntax errors and unparseable files
