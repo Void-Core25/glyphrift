@@ -188,12 +188,11 @@ uv run glyphrift pr-check --base <ref> --head <ref>
 
 *(Update at the end of every session.)*
 
-- Phase: **0, Setup**
-- Done: README/ROADMAP; name (GLYPHRIFT) and license (MIT) decided; repo skeleton with pyproject, ruff, pytest and CI workflow. `git init` done, nothing committed yet
-- Verified locally: `ruff check`, `ruff format --check`, `pytest` (1 passed, 1 skipped). The CLI test is skipped locally because `typer` could not be installed in the build sandbox (no network); it runs in CI
-- Not yet verified: `uv sync`, the CI workflow on GitHub, `glyphrift version` end to end
-- Next: pick 5 eval repos and pin commit hashes; optional UI sketch; then Phase 1
-- Open: user to check PyPI/GitHub/npm/domain/USPTO for the name
+- Phase: **0, Setup** (3 of 5 items done)
+- Done: name (GLYPHRIFT), license (MIT, "Void Core"), skeleton, CI. Repo is public at github.com/Void-Core25/glyphrift. Verified: `uv sync`, `uv run pytest` (2 passed), `uv run glyphrift version` on Windows; ruff check and format pass; CI run #1 green on `main`
+- Next: pick 5 eval repos and pin commit hashes (chosen: `click`, `requests`, `flask`, `rich`, `httpx`; user runs `scripts/pin_eval_repos.ps1` and pastes the output); UI sketch is optional. Then start Phase 1
+- Open: user to confirm PyPI/GitHub/npm/domain/USPTO name checks before publishing a release
+- Working notes: user is on Windows (PowerShell) with `uv`. Claude's sandbox has no network for installs, so anything needing new packages must be run by the user locally. Zip downloads do not include `.git`
 
 ## Decisions log
 
@@ -206,6 +205,8 @@ uv run glyphrift pr-check --base <ref> --head <ref>
 - 2026-11-07: Every edge carries a confidence label; this is the core of the evidence principle.
 - 2026-11-07: License: MIT, copyright "Void Core". Free, simple, compatible with all planned dependencies; no need for a stricter license on a portfolio project.
 - 2026-11-07: Skeleton uses hatchling build backend, `src/` layout, ruff (E,F,I,UP,B; line length 100), pytest with `pythonpath=src`, CI matrix Python 3.11-3.13 via uv. CLI test uses `importorskip` so it skips where typer is absent.
+- 2026-11-08: Eval repos chosen: click, requests, flask, rich, httpx (mix of decorator-heavy, classic class-based, and fully typed code). httpx picked because type hints give solid ground truth for `inferred` edges.
+- 2026-11-08: Repo created public at github.com/Void-Core25/glyphrift (portfolio visibility; Actions free on public repos). CI green on first push.
 - 2026-11-07: Name finalised: GLYPHRIFT (spelled G-L-Y-P-H-R-I-F-T; package/CLI `glyphrift`). Registry checks (PyPI, GitHub, npm, domain, USPTO) still to be done by the user before publishing.
 - 2026-11-07: Dropped name "Cartog" (existing code-graph tool). Name pending.
 - 2026-11-07: Goals are learning + portfolio + fun, not a startup. Scope trimmed accordingly (no MCP, no hosted site, no multi-language).

@@ -10,3 +10,4 @@ build/
 node_modules/
 web/dist/
 .DS_Store
+eval_repos/
