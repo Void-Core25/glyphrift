@@ -94,10 +94,11 @@ Single Python package, local-first, no external services.
 ```
 
 ### Data model (SQLite)
-- `files(id, path, language, sha256, size, indexed_at)`
+- `files(id, path, language, sha256, size, indexed_at, parse_error)`; `parse_error` is NULL when parsing succeeded
 - `symbols(id, file_id, kind, name, qualified_name, line_start, line_end, parent_id, complexity)`; `kind`: `module | class | function | method`
 - `edges(id, src_symbol_id, dst_symbol_id NULL, dst_name, kind, confidence, how, file_id, line)`; `kind`: `imports | calls | inherits | references`
-- `findings(id, type, title, severity, confidence, evidence_json, created_at)`; `type`: `cycle | complexity | dead_code_candidate | ...`
+- `findings(id, type, title, severity, confidence, evidence_json, created_at)`; `type`: `cycle | complexity | dead_code_candidate | ...`; `severity`: `info | low | medium | high`
+- Source of truth for the schema: `src/glyphrift/store/migrations.py`. Invariants enforced by the database: an edge has `dst_symbol_id` if and only if its confidence is not `unresolved`; deleting a file, or a symbol, deletes the edges that touch it (so the incremental indexer must re-index files that depended on a changed file); `line_start >= 1` and `line_end >= line_start` (an empty module is lines 1-1)
 
 ### Confidence meaning
 | Level | Meaning | Example |
@@ -188,12 +189,14 @@ uv run glyphrift pr-check --base <ref> --head <ref>
 
 *(Update at the end of every session.)*
 
-- Phase: **1, Indexer and evaluation harness** (1 of 10 items done)
+- Phase: **1, Indexer and evaluation harness** (2 of 10 items done)
 - Done in Phase 0: name (GLYPHRIFT), license (MIT, "Void Core"), skeleton, CI (green), eval repos pinned in `docs/eval-repos.md`. Repo is public at github.com/Void-Core25/glyphrift
-- Done in Phase 1: file walker (`indexer/walker.py`: `walk_repo()` yields `FileRecord(path, size, sha256, language)`, sorted, posix paths). Verified in Claude's sandbox: ruff clean, pytest 19 passed / 1 skipped (CLI test skipped there because typer is not installed). NOT yet run on the user's Windows machine or in CI after this change
-- Next: SQLite schema + migrations (`files`, `symbols`, `edges`, `findings`)
+- Done in Phase 1:
+  - File walker (`indexer/walker.py`). Verified on the user's Windows machine and CI.
+  - SQLite schema + migrations (`store/migrations.py`, `store/db.py`). Verified in Claude's sandbox only: ruff clean, pytest 40 passed / 1 skipped (CLI test skipped there because typer is not installed). NOT yet run on the user's Windows machine or in CI
+- Next: `ast` extraction (modules, classes, functions, methods, line ranges) into the `symbols` table
 - Open: user to confirm PyPI/GitHub/npm/domain/USPTO name checks before publishing a release
-- Working notes: user is on Windows (PowerShell) with `uv`. Claude's sandbox has no network for installs and cannot clone GitHub repos, so anything needing new packages or the eval repos must be run by the user locally (or the user pastes output). Zip downloads do not include `.git`
+- Working notes: user is on Windows (PowerShell) with `uv`. Claude's sandbox has no network for installs and cannot clone GitHub repos, so anything needing new packages or the eval repos must be run by the user locally (or the user pastes output). Zip downloads do not include `.git`. Windows gotcha already hit once: `Path.write_text` converts `\n` to `\r\n`; tests that compare byte sizes must write bytes
 
 ## Decisions log
 
@@ -206,6 +209,7 @@ uv run glyphrift pr-check --base <ref> --head <ref>
 - 2026-11-07: Every edge carries a confidence label; this is the core of the evidence principle.
 - 2026-11-07: License: MIT, copyright "Void Core". Free, simple, compatible with all planned dependencies; no need for a stricter license on a portfolio project.
 - 2026-11-07: Skeleton uses hatchling build backend, `src/` layout, ruff (E,F,I,UP,B; line length 100), pytest with `pythonpath=src`, CI matrix Python 3.11-3.13 via uv. CLI test uses `importorskip` so it skips where typer is absent.
+- 2026-11-08: Schema v1 added beyond the original sketch: `files.parse_error` (record unparseable files instead of failing), `findings.severity` values (`info|low|medium|high`), CHECK constraints on enums, line ranges and `json_valid(evidence_json)`, and the invariant `(confidence = 'unresolved') = (dst_symbol_id IS NULL)` so an edge can never claim to be resolved without a target. All FKs cascade, including `edges.dst_symbol_id` (dangling edges are impossible; dependants must be re-indexed). Migrations are Python strings versioned by `PRAGMA user_version`, each applied atomically with its version bump; no ORM and no migration library. Connections: autocommit mode, foreign keys on, WAL for file databases, `transaction()` helper for grouped writes.
 - 2026-11-08: File walker uses `git ls-files --cached --others --exclude-standard` in git repos so `.gitignore` semantics are exactly git's, with no new dependency (the `pathspec` library was the alternative). Fallback tree walk does not interpret `.gitignore` (documented). Default skipped dirs include `build` and `dist`; overridable via `skip_dirs`. Symlinks are never followed. Unreadable files are skipped with a logged warning.
 - 2026-11-08: Eval repo commits pinned (see docs/eval-repos.md). Phase 0 required items complete.
 - 2026-11-08: Eval repos chosen: click, requests, flask, rich, httpx (mix of decorator-heavy, classic class-based, and fully typed code). httpx picked because type hints give solid ground truth for `inferred` edges.
