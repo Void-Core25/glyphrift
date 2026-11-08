@@ -27,8 +27,8 @@ Goal: reliably extract Python structure, and be able to *measure* correctness.
 - [x] File walker: respects `.gitignore` (via `git ls-files` in git repos; plain tree walk fallback without `.gitignore` support), skips venvs/build dirs, never follows symlinks, records size + sha256 + language (`src/glyphrift/indexer/walker.py`, 15 tests)
 - [x] SQLite schema + migrations (`files`, `symbols`, `edges`, `findings`): `src/glyphrift/store/` (`migrations.py`, `db.py`; versioned via `PRAGMA user_version`, atomic migrations, 21 tests)
 - [x] `ast` extraction: modules, classes, functions, methods, line ranges (`indexer/extract.py`), plus `indexer/pipeline.py` (`index_repo`: walks, extracts, stores files + symbols; re-indexes only changed files) and `scripts/show_symbols.py` demo
-- [ ] **<- NEXT** Import extraction + **import resolver** (absolute, relative, packages, `__init__`, `from x import *`)
-- [ ] Call extraction with confidence labels (`resolved` / `inferred` / `heuristic` / `unresolved`)
+- [x] Import extraction + **import resolver** (absolute, relative, packages, `__init__`, `from x import *`, re-export chains): `indexer/extract.py` records raw import facts, `indexer/resolve.py` derives `imports` edges (34 new tests; checked on the stdlib: 4,033 edges, all 781 stdlib-unresolved + 16 genuine externals explained)
+- [ ] **<- NEXT** Call extraction with confidence labels (`resolved` / `inferred` / `heuristic` / `unresolved`)
 - [ ] Inheritance edges; `self.method()` resolution through class hierarchy
 - [ ] Graceful handling of syntax errors and unparseable files
 - [ ] Hand-written fixture projects in `tests/fixtures/` with known correct graphs

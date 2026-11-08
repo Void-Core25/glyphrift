@@ -22,6 +22,9 @@ def main() -> None:
     parser.add_argument("repo", help="path to the repository to index")
     parser.add_argument("--file", help="print the symbol tree of this file (path relative to repo)")
     parser.add_argument("--errors", action="store_true", help="list files that failed to parse")
+    parser.add_argument(
+        "--unresolved", action="store_true", help="list imports that could not be resolved"
+    )
     args = parser.parse_args()
 
     conn = connect(":memory:")
@@ -46,9 +49,36 @@ def main() -> None:
     )
     print(f"Files that failed to parse: {len(stats.parse_errors)}")
 
+    by_confidence = dict(
+        conn.execute(
+            "SELECT confidence, COUNT(*) FROM edges WHERE kind = 'imports' GROUP BY confidence"
+        ).fetchall()
+    )
+    total_edges = sum(by_confidence.values())
+    print(
+        f"Import edges: {total_edges} ("
+        + ", ".join(
+            f"{by_confidence.get(level, 0)} {level}"
+            for level in ("resolved", "inferred", "heuristic", "unresolved")
+        )
+        + ")"
+    )
+
     if args.errors:
         for path, message in stats.parse_errors:
             print(f"  {path}: {message}")
+
+    if args.unresolved:
+        rows = conn.execute(
+            "SELECT f.path, e.line, e.dst_name, e.how FROM edges e "
+            "JOIN files f ON f.id = e.file_id "
+            "WHERE e.kind = 'imports' AND e.confidence = 'unresolved' ORDER BY f.path, e.line"
+        ).fetchall()
+        print(f"\nUnresolved imports ({len(rows)}):")
+        for row in rows[:200]:
+            print(f"  {row['path']}:{row['line']}  {row['dst_name']}  - {row['how']}")
+        if len(rows) > 200:
+            print(f"  ... and {len(rows) - 200} more")
 
     if args.file:
         rows = conn.execute(
@@ -66,6 +96,19 @@ def main() -> None:
             indent = "  " * depth[row["id"]]
             label = f"{row['kind']:8} {row['name']}"
             print(f"  {indent}{label}  (lines {row['line_start']}-{row['line_end']})")
+
+        edge_rows = conn.execute(
+            "SELECT e.line, e.confidence, e.dst_name, dst.qualified_name AS dst, e.how "
+            "FROM edges e JOIN files f ON f.id = e.file_id "
+            "LEFT JOIN symbols dst ON dst.id = e.dst_symbol_id "
+            "WHERE e.kind = 'imports' AND f.path = ? ORDER BY e.line, e.id",
+            (args.file,),
+        ).fetchall()
+        print(f"\n  Imports ({len(edge_rows)}):")
+        for edge in edge_rows:
+            target = edge["dst"] or f"({edge['dst_name']})"
+            print(f"    line {edge['line']:<4} {edge['confidence']:10} {target}")
+            print(f"              {edge['how']}")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 """Symbol extraction from Python source, using the standard-library ``ast`` module.
 
-Produces the modules, classes, functions and methods defined in a file, with line ranges.
-Imports, calls and inheritance edges are extracted by later steps.
+Produces the modules, classes, functions and methods defined in a file, with line ranges,
+plus the raw facts of every import statement (resolved into edges by ``resolve.py``).
+Calls and inheritance edges are extracted by later steps.
 
 Conventions:
 
@@ -16,6 +17,11 @@ Conventions:
   because Python lets a name be defined twice (property setters, conditional definitions).
 * ``line_start`` of a decorated definition is the line of its first decorator, so a change to
   a decorator maps to the right symbol. ``line_end`` is the last line of the definition.
+* Each imported name is one ``ExtractedImport``: ``import a.b, c`` gives two records and
+  ``from x import y, z`` gives two. ``scope`` is the innermost enclosing module, class or
+  function, so an import inside a function is attributed to that function. Imports under
+  ``if TYPE_CHECKING:`` are flagged. ``from __future__ import ...`` is not an import of
+  anything and is skipped.
 * Only the grammar of the Python running GLYPHRIFT can be parsed: code using newer syntax
   than the running interpreter is reported as a ``SyntaxError`` parse error.
 """
@@ -51,9 +57,24 @@ class ExtractedSymbol:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtractedImport:
+    """One imported name from one import statement."""
+
+    scope: int  # index in ExtractionResult.symbols of the enclosing module/class/function
+    kind: Literal["import", "from"]
+    level: int  # number of leading dots of a relative import (0 = absolute)
+    module: str | None  # 'a.b' in `import a.b` / `from a.b import x`; None for `from . import x`
+    name: str | None  # the imported name for `from` imports ("*" for a star import)
+    asname: str | None  # the alias after `as`, if any
+    line: int
+    type_checking: bool  # inside an `if TYPE_CHECKING:` block
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionResult:
     symbols: tuple[ExtractedSymbol, ...]  # symbols[0] is always the module symbol
     parse_error: str | None
+    imports: tuple[ExtractedImport, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +119,13 @@ def _count_lines(source: bytes | str) -> int:
     return len(pieces) - (1 if last_is_empty else 0)
 
 
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    """True for `TYPE_CHECKING` and `typing.TYPE_CHECKING` (any module prefix)."""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+
 def _describe_error(exc: Exception) -> str:
     if isinstance(exc, SyntaxError):
         where = f" (line {exc.lineno})" if exc.lineno else ""
@@ -128,14 +156,15 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
         return ExtractionResult(symbols=(module,), parse_error=_describe_error(exc))
 
     symbols: list[ExtractedSymbol] = [module]
+    imports: list[ExtractedImport] = []
     module_scope = _Scope(index=0, qualified_name=module_name, kind="module")
 
     # Iterative pre-order walk: deeply nested code (long elif chains) cannot overflow the stack.
-    stack: list[tuple[ast.AST, _Scope]] = [
-        (child, module_scope) for child in reversed(list(ast.iter_child_nodes(tree)))
+    stack: list[tuple[ast.AST, _Scope, bool]] = [
+        (child, module_scope, False) for child in reversed(list(ast.iter_child_nodes(tree)))
     ]
     while stack:
-        node, scope = stack.pop()
+        node, scope, in_type_checking = stack.pop()
         if isinstance(node, _DEFINITIONS):
             kind: SymbolKind
             if isinstance(node, ast.ClassDef):
@@ -157,8 +186,49 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
                 )
             )
             inner = _Scope(index=len(symbols) - 1, qualified_name=qualified, kind=kind)
-            stack.extend((child, inner) for child in reversed(list(ast.iter_child_nodes(node))))
+            stack.extend(
+                (child, inner, in_type_checking)
+                for child in reversed(list(ast.iter_child_nodes(node)))
+            )
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(
+                    ExtractedImport(
+                        scope=scope.index,
+                        kind="import",
+                        level=0,
+                        module=alias.name,
+                        name=None,
+                        asname=alias.asname,
+                        line=node.lineno,
+                        type_checking=in_type_checking,
+                    )
+                )
+        elif isinstance(node, ast.ImportFrom):
+            level = node.level or 0
+            if level == 0 and node.module == "__future__":
+                continue
+            for alias in node.names:
+                imports.append(
+                    ExtractedImport(
+                        scope=scope.index,
+                        kind="from",
+                        level=level,
+                        module=node.module,
+                        name=alias.name,
+                        asname=alias.asname,
+                        line=node.lineno,
+                        type_checking=in_type_checking,
+                    )
+                )
+        elif isinstance(node, ast.If) and _is_type_checking_guard(node.test):
+            # Only the body is type-checking-only; the else branch runs at runtime.
+            stack.extend((child, scope, in_type_checking) for child in reversed(node.orelse))
+            stack.extend((child, scope, True) for child in reversed(node.body))
         elif isinstance(node, _STATEMENT_CONTAINERS):
-            stack.extend((child, scope) for child in reversed(list(ast.iter_child_nodes(node))))
+            stack.extend(
+                (child, scope, in_type_checking)
+                for child in reversed(list(ast.iter_child_nodes(node)))
+            )
 
-    return ExtractionResult(symbols=tuple(symbols), parse_error=None)
+    return ExtractionResult(symbols=tuple(symbols), parse_error=None, imports=tuple(imports))

@@ -368,3 +368,119 @@ def test_invariants_hold_on_real_standard_library_code() -> None:
                 assert parent.line_start <= symbol.line_start, (path.name, symbol)
                 assert symbol.line_end <= parent.line_end, (path.name, symbol)
     assert failures <= len(files) * 0.02
+
+
+# --- import extraction --------------------------------------------------------------------
+
+
+def imports_of(source: str) -> list[tuple[object, ...]]:
+    """(kind, level, module, name, asname, line, type_checking) for each import record."""
+    result = extract_symbols(source, "mod")
+    assert result.parse_error is None
+    return [
+        (i.kind, i.level, i.module, i.name, i.asname, i.line, i.type_checking)
+        for i in result.imports
+    ]
+
+
+def test_plain_imports_one_record_per_name() -> None:
+    assert imports_of("import os, sys as system\nimport a.b.c\n") == [
+        ("import", 0, "os", None, None, 1, False),
+        ("import", 0, "sys", None, "system", 1, False),
+        ("import", 0, "a.b.c", None, None, 2, False),
+    ]
+
+
+def test_from_imports_absolute_relative_and_star() -> None:
+    source = (
+        "from a.b import x, y as z\n"  # 1
+        "from . import sibling\n"  # 2
+        "from .. import parent\n"  # 3
+        "from .pkg.mod import thing\n"  # 4
+        "from ...deep import *\n"  # 5
+    )
+    assert imports_of(source) == [
+        ("from", 0, "a.b", "x", None, 1, False),
+        ("from", 0, "a.b", "y", "z", 1, False),
+        ("from", 1, None, "sibling", None, 2, False),
+        ("from", 2, None, "parent", None, 3, False),
+        ("from", 1, "pkg.mod", "thing", None, 4, False),
+        ("from", 3, "deep", "*", None, 5, False),
+    ]
+
+
+def test_future_imports_are_skipped() -> None:
+    assert imports_of("from __future__ import annotations\nimport os\n") == [
+        ("import", 0, "os", None, None, 2, False)
+    ]
+
+
+def test_imports_are_attributed_to_their_enclosing_scope() -> None:
+    source = (
+        "import top\n"  # 1
+        "class C:\n"  # 2
+        "    import in_class\n"  # 3
+        "    def m(self):\n"  # 4
+        "        import in_method\n"  # 5
+        "def f():\n"  # 6
+        "    from x import in_function\n"  # 7
+    )
+    result = extract_symbols(source, "mod")
+    by_module = {i.module: result.symbols[i.scope].qualified_name for i in result.imports}
+    assert by_module == {
+        "top": "mod",
+        "in_class": "mod.C",
+        "in_method": "mod.C.m",
+        "x": "mod.f",
+    }
+
+
+def test_imports_inside_compound_statements_belong_to_the_enclosing_scope() -> None:
+    source = (
+        "try:\n    import fast\nexcept ImportError:\n    import slow\nif True:\n    import cond\n"
+    )
+    result = extract_symbols(source, "mod")
+    assert [(i.module, i.scope) for i in result.imports] == [("fast", 0), ("slow", 0), ("cond", 0)]
+
+
+def test_type_checking_imports_are_flagged_only_in_the_guarded_branch() -> None:
+    source = (
+        "import typing\n"  # 1
+        "from typing import TYPE_CHECKING\n"  # 2
+        "if TYPE_CHECKING:\n"  # 3
+        "    import only_types\n"  # 4
+        "else:\n"  # 5
+        "    import at_runtime\n"  # 6
+        "if typing.TYPE_CHECKING:\n"  # 7
+        "    from x import also_types\n"  # 8
+        "import after\n"  # 9
+    )
+    flags = {m: tc for (_, _, m, _, _, _, tc) in imports_of(source)}
+    assert flags == {
+        "typing": False,
+        "only_types": True,
+        "at_runtime": False,
+        "x": True,
+        "after": False,
+    }
+
+
+def test_type_checking_flag_does_not_leak_into_definitions_after_the_block() -> None:
+    source = (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    def stub():\n"
+        "        pass\n"
+        "def real():\n"
+        "    import lazy\n"
+    )
+    result = extract_symbols(source, "mod")
+    assert [(s.name) for s in result.symbols[1:]] == ["stub", "real"]
+    (lazy,) = [i for i in result.imports if i.module == "lazy"]
+    assert lazy.type_checking is False
+
+
+def test_syntax_error_yields_no_imports() -> None:
+    result = extract_symbols("import os\ndef broken(:\n", "mod")
+    assert result.parse_error is not None
+    assert result.imports == ()

@@ -1,8 +1,10 @@
 """Index a repository into the SQLite store.
 
-Currently records files and their symbols. Edges (imports, calls, inheritance) are added by
-later roadmap items; when they exist, this module must also re-index files that depend on a
-changed file (deleting a symbol deletes the edges that point at it).
+Records files, their symbols and their raw import statements (incremental: only new or
+changed files are parsed), then rebuilds every ``imports`` edge from those stored facts
+whenever anything changed (see ``resolve.py``), so files that depend on a changed file get
+correct edges without being re-parsed. Call and inheritance edges come in later roadmap items
+and will follow the same pattern: store per-file facts, derive edges globally.
 
 Only files with a supported language (currently Python) are stored.
 """
@@ -16,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from glyphrift.indexer.extract import compute_module_name, extract_symbols
+from glyphrift.indexer.resolve import resolve_imports
 from glyphrift.indexer.walker import FileRecord, walk_repo
 from glyphrift.store import transaction
 
@@ -29,6 +32,8 @@ class IndexStats:
     files_unchanged: int = 0
     files_removed: int = 0
     symbols_written: int = 0
+    import_edges: int = 0  # import edges currently written by this run (0 if nothing changed)
+    unresolved_imports: int = 0
     parse_errors: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
 
 
@@ -70,6 +75,11 @@ def index_repo(root: str | Path, conn: sqlite3.Connection) -> IndexStats:
                 stats.files_added += 1
             elif written:
                 stats.files_updated += 1
+
+        if stats.files_added or stats.files_updated or stats.files_removed:
+            resolution = resolve_imports(conn)
+            stats.import_edges = resolution.edges
+            stats.unresolved_imports = resolution.unresolved
     return stats
 
 
@@ -120,4 +130,23 @@ def _index_file(
         assert cursor.lastrowid is not None
         row_ids.append(cursor.lastrowid)
     stats.symbols_written += len(row_ids)
+
+    conn.executemany(
+        "INSERT INTO import_facts (file_id, scope_symbol_id, kind, level, module, name, asname, "
+        "line, type_checking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                file_id,
+                row_ids[imp.scope],
+                imp.kind,
+                imp.level,
+                imp.module,
+                imp.name,
+                imp.asname,
+                imp.line,
+                int(imp.type_checking),
+            )
+            for imp in result.imports
+        ],
+    )
     return True

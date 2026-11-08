@@ -88,8 +88,35 @@ CREATE TABLE findings (
 CREATE INDEX idx_findings_type ON findings(type);
 """
 
+# The index is derived data, so a migration that changes what is extracted from source files
+# clears it (DELETE FROM files cascades); the next index run rebuilds everything.
+_V2_IMPORT_FACTS = """
+DELETE FROM files;
+
+-- Raw import statements, one row per imported name. Import edges are derived from these
+-- (and from the symbols table) by resolve_imports() and are rebuilt whenever any file changes.
+CREATE TABLE import_facts (
+    id              INTEGER PRIMARY KEY,
+    file_id         INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    scope_symbol_id INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    kind            TEXT    NOT NULL CHECK (kind IN ('import', 'from')),
+    level           INTEGER NOT NULL CHECK (level >= 0),   -- leading dots of a relative import
+    module          TEXT,                                  -- NULL only for `from . import x`
+    name            TEXT,                                  -- imported name ('*' for star)
+    asname          TEXT,
+    line            INTEGER NOT NULL CHECK (line >= 1),
+    type_checking   INTEGER NOT NULL CHECK (type_checking IN (0, 1)),
+    CHECK ((kind = 'from') = (name IS NOT NULL)),
+    CHECK (kind = 'from' OR level = 0),
+    CHECK (module IS NOT NULL OR (kind = 'from' AND level > 0))
+);
+CREATE INDEX idx_import_facts_file_id ON import_facts(file_id);
+CREATE INDEX idx_import_facts_scope   ON import_facts(scope_symbol_id);
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema: files, symbols, edges, findings", _V1_INITIAL_SCHEMA),
+    Migration(2, "import_facts table; clears the index so it is rebuilt", _V2_IMPORT_FACTS),
 )
 
 SCHEMA_VERSION: int = MIGRATIONS[-1].version

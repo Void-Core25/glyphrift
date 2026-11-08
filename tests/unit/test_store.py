@@ -294,3 +294,68 @@ def test_deleting_a_parent_symbol_removes_its_children(conn: sqlite3.Connection)
     conn.execute("DELETE FROM symbols WHERE id = ?", (cls,))
 
     assert count(conn, "symbols") == 0
+
+
+# --- migration 2: import facts ------------------------------------------------------------
+
+
+def add_import_fact(
+    conn: sqlite3.Connection,
+    file_id: int,
+    scope: int,
+    kind: str = "from",
+    level: int = 0,
+    module: str | None = "a",
+    name: str | None = "x",
+) -> None:
+    conn.execute(
+        "INSERT INTO import_facts (file_id, scope_symbol_id, kind, level, module, name, asname, "
+        "line, type_checking) VALUES (?, ?, ?, ?, ?, ?, NULL, 1, 0)",
+        (file_id, scope, kind, level, module, name),
+    )
+
+
+def test_import_fact_shapes_are_validated(conn: sqlite3.Connection) -> None:
+    file_id = add_file(conn)
+    scope = add_symbol(conn, file_id, "mod", kind="module")
+
+    add_import_fact(conn, file_id, scope, "import", 0, "a.b", None)  # import a.b
+    add_import_fact(conn, file_id, scope, "from", 0, "a", "x")  # from a import x
+    add_import_fact(conn, file_id, scope, "from", 1, None, "x")  # from . import x
+    add_import_fact(conn, file_id, scope, "from", 2, "m", "*")  # from ..m import *
+
+    bad_shapes = [
+        ("import", 0, "a", "x"),  # plain import cannot have a name
+        ("from", 0, "a", None),  # from-import needs a name
+        ("import", 1, "a", None),  # plain imports cannot be relative
+        ("from", 0, None, "x"),  # absolute from-import needs a module
+        ("require", 0, "a", None),  # unknown kind
+    ]
+    for kind, level, module, name in bad_shapes:
+        with pytest.raises(sqlite3.IntegrityError):
+            add_import_fact(conn, file_id, scope, kind, level, module, name)
+
+
+def test_deleting_a_file_removes_its_import_facts(conn: sqlite3.Connection) -> None:
+    file_id = add_file(conn)
+    scope = add_symbol(conn, file_id, "mod", kind="module")
+    add_import_fact(conn, file_id, scope)
+
+    conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+
+    assert count(conn, "import_facts") == 0
+
+
+def test_migrating_from_v1_clears_the_derived_index() -> None:
+    raw = sqlite3.connect(":memory:", isolation_level=None)
+    raw.execute("PRAGMA foreign_keys = ON")
+    assert migrate(raw, MIGRATIONS[:1]) == 1
+    raw.execute(
+        "INSERT INTO files (path, language, sha256, size, indexed_at) "
+        "VALUES ('old.py', 'python', 'abc', 1, '2026-01-01T00:00:00Z')"
+    )
+
+    assert migrate(raw, MIGRATIONS) == SCHEMA_VERSION
+
+    assert raw.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0  # rebuilt next index run
+    raw.close()
