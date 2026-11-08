@@ -2,6 +2,7 @@
 
 from glyphrift.indexer.calls import CallResolutionStats, resolve_calls
 from glyphrift.indexer.extract import (
+    ExtractedBase,
     ExtractedCall,
     ExtractedImport,
     ExtractedSymbol,
@@ -9,6 +10,7 @@ from glyphrift.indexer.extract import (
     compute_module_name,
     extract_symbols,
 )
+from glyphrift.indexer.inherit import InheritanceStats, resolve_inheritance
 from glyphrift.indexer.pipeline import IndexStats, index_repo
 from glyphrift.indexer.resolve import ImportResolutionStats, resolve_imports
 from glyphrift.indexer.walker import (
@@ -22,6 +24,8 @@ from glyphrift.indexer.walker import (
 __all__ = [
     "DEFAULT_SKIP_DIRS",
     "CallResolutionStats",
+    "InheritanceStats",
+    "ExtractedBase",
     "ExtractedCall",
     "ExtractedImport",
     "ExtractedSymbol",
@@ -36,5 +40,6 @@ __all__ = [
     "index_repo",
     "resolve_calls",
     "resolve_imports",
+    "resolve_inheritance",
     "walk_repo",
 ]

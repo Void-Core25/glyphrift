@@ -136,10 +136,32 @@ CREATE TABLE call_facts (
 CREATE INDEX idx_call_facts_file_id ON call_facts(file_id);
 """
 
+_V4_BASE_FACTS = """
+DELETE FROM files;
+
+-- Raw base-class expressions of class definitions, in source order (id order within a class).
+-- `inherits` edges are derived from these by resolve_inheritance() and rebuilt whenever any
+-- file changes. `root` is NULL for a base that is not a plain (dotted) name, such as a call.
+CREATE TABLE base_facts (
+    id                  INTEGER PRIMARY KEY,
+    file_id             INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    class_symbol_id     INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    scope_symbol_id     INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    root                TEXT,
+    attrs               TEXT    NOT NULL,
+    text                TEXT    NOT NULL,  -- the base expression as written (shortened)
+    line                INTEGER NOT NULL CHECK (line >= 1),
+    opaque_in_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+    CHECK (root IS NOT NULL OR attrs = '')
+);
+CREATE INDEX idx_base_facts_file_id ON base_facts(file_id);
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema: files, symbols, edges, findings", _V1_INITIAL_SCHEMA),
     Migration(2, "import_facts table; clears the index so it is rebuilt", _V2_IMPORT_FACTS),
     Migration(3, "call_facts table; clears the index so it is rebuilt", _V3_CALL_FACTS),
+    Migration(4, "base_facts table; clears the index so it is rebuilt", _V4_BASE_FACTS),
 )
 
 SCHEMA_VERSION: int = MIGRATIONS[-1].version

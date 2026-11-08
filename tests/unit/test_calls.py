@@ -181,7 +181,7 @@ def test_undefined_name_is_unresolved(tmp_path: Path, conn: sqlite3.Connection) 
     assert found(conn, "m.go") == {(None, "unresolved")}
 
 
-def test_super_call_is_unresolved(tmp_path: Path, conn: sqlite3.Connection) -> None:
+def test_super_call_resolves_to_base_class_method(tmp_path: Path, conn: sqlite3.Connection) -> None:
     run(
         tmp_path,
         conn,
@@ -190,7 +190,89 @@ def test_super_call_is_unresolved(tmp_path: Path, conn: sqlite3.Connection) -> N
             "class B(A):\n    def f(self):\n        super().f()\n"
         },
     )
-    assert found(conn, "m.B.f") == {(None, "unresolved")}
+    rows = calls(conn, "m.B.f")
+    assert [(r["dst"], r["confidence"]) for r in rows] == [("m.A.f", "inferred")]
+    assert "base class m.A" in rows[0]["how"]
+
+
+def test_super_call_skips_the_own_class_and_reports_external_bases(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    run(
+        tmp_path,
+        conn,
+        {
+            "m.py": "import threading\n"
+            "class B(threading.Thread):\n    def run(self):\n        super().run()\n"
+        },
+    )
+    rows = calls(conn, "m.B.run")
+    assert [(r["dst"], r["confidence"]) for r in rows] == [(None, "unresolved")]
+    assert "threading.Thread" in rows[0]["how"]
+
+
+def test_self_call_finds_method_inherited_through_several_levels(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    run(
+        tmp_path,
+        conn,
+        {
+            "base.py": "class Root:\n    def helper(self): pass\n",
+            "mid.py": "from base import Root\nclass Mid(Root): pass\n",
+            "leaf.py": "import mid\nclass Leaf(mid.Mid):\n"
+            "    def go(self):\n        self.helper()\n",
+        },
+    )
+    rows = calls(conn, "leaf.Leaf.go")
+    assert [(r["dst"], r["confidence"]) for r in rows] == [("base.Root.helper", "inferred")]
+    assert "inherited from base class base.Root" in rows[0]["how"]
+
+
+def test_own_method_wins_over_inherited_one(tmp_path: Path, conn: sqlite3.Connection) -> None:
+    run(
+        tmp_path,
+        conn,
+        {
+            "m.py": "class A:\n    def f(self): pass\n"
+            "class B(A):\n    def f(self): pass\n    def g(self):\n        self.f()\n"
+        },
+    )
+    assert found(conn, "m.B.g") == {("m.B.f", "inferred")}
+
+
+def test_class_attribute_call_finds_inherited_method(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    run(
+        tmp_path,
+        conn,
+        {"m.py": "class A:\n    def f(self): pass\nclass B(A): pass\ndef go(b):\n    B.f(b)\n"},
+    )
+    rows = calls(conn, "m.go")
+    assert [(r["dst"], r["confidence"]) for r in rows] == [("m.A.f", "inferred")]
+
+
+def test_missing_self_method_mentions_external_bases(
+    tmp_path: Path, conn: sqlite3.Connection
+) -> None:
+    run(
+        tmp_path,
+        conn,
+        {"m.py": "class E(Exception):\n    def go(self):\n        self.with_traceback(None)\n"},
+    )
+    rows = calls(conn, "m.E.go")
+    assert [(r["dst"], r["confidence"]) for r in rows] == [(None, "unresolved")]
+    assert "external base class(es): Exception" in rows[0]["how"]
+
+
+def test_cyclic_inheritance_does_not_hang(tmp_path: Path, conn: sqlite3.Connection) -> None:
+    run(
+        tmp_path,
+        conn,
+        {"m.py": "class A(B):\n    def f(self):\n        self.nope()\nclass B(A): pass\n"},
+    )
+    assert found(conn, "m.A.f") == {(None, "unresolved")}
 
 
 def test_invariant_and_rebuild_on_change(tmp_path: Path, conn: sqlite3.Connection) -> None:

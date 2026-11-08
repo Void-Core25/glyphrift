@@ -391,3 +391,37 @@ def test_deleting_a_file_removes_its_call_facts(conn: sqlite3.Connection) -> Non
     conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
 
     assert count(conn, "call_facts") == 0
+
+
+def test_base_fact_shapes_are_validated(conn: sqlite3.Connection) -> None:
+    file_id = add_file(conn)
+    scope = add_symbol(conn, file_id, "mod", kind="module")
+    cls = add_symbol(conn, file_id, "mod.A", kind="class", parent_id=scope)
+    insert = (
+        "INSERT INTO base_facts (file_id, class_symbol_id, scope_symbol_id, root, attrs, text, "
+        "line, opaque_in_symbol_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    conn.execute(insert, (file_id, cls, scope, "B", "", "B", 1, None))  # valid
+    conn.execute(insert, (file_id, cls, scope, None, "", "make()", 1, None))  # dynamic base: valid
+    bad_rows = [
+        (file_id, cls, scope, None, "x", "x", 1, None),  # attributes without a root
+        (file_id, cls, scope, "B", "", "B", 0, None),  # line < 1
+    ]
+    for row in bad_rows:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(insert, row)
+
+
+def test_deleting_a_class_removes_its_base_facts(conn: sqlite3.Connection) -> None:
+    file_id = add_file(conn)
+    scope = add_symbol(conn, file_id, "mod", kind="module")
+    cls = add_symbol(conn, file_id, "mod.A", kind="class", parent_id=scope)
+    conn.execute(
+        "INSERT INTO base_facts (file_id, class_symbol_id, scope_symbol_id, root, attrs, text, "
+        "line) VALUES (?, ?, ?, 'B', '', 'B', 1)",
+        (file_id, cls, scope),
+    )
+
+    conn.execute("DELETE FROM symbols WHERE id = ?", (cls,))
+
+    assert count(conn, "base_facts") == 0

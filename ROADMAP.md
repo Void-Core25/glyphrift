@@ -29,8 +29,8 @@ Goal: reliably extract Python structure, and be able to *measure* correctness.
 - [x] `ast` extraction: modules, classes, functions, methods, line ranges (`indexer/extract.py`), plus `indexer/pipeline.py` (`index_repo`: walks, extracts, stores files + symbols; re-indexes only changed files) and `scripts/show_symbols.py` demo
 - [x] Import extraction + **import resolver** (absolute, relative, packages, `__init__`, `from x import *`, re-export chains): `indexer/extract.py` records raw import facts, `indexer/resolve.py` derives `imports` edges (34 new tests; checked on the stdlib: 4,033 edges, all 781 stdlib-unresolved + 16 genuine externals explained)
 - [x] Call extraction with confidence labels (`resolved` / `inferred` / `heuristic` / `unresolved`): `call_facts` table (schema v3), `indexer/calls.py`, 18 new tests; stdlib: 30,589 call edges in about 4 s. Precision still to be measured by the eval harness
-- [ ] **<- NEXT** Inheritance edges; `self.method()` resolution through class hierarchy
-- [ ] Graceful handling of syntax errors and unparseable files
+- [x] Inheritance edges; `self.method()` / `super()` resolution through class hierarchy: `base_facts` table (schema v4), `indexer/inherit.py`, `indexer/lookup.py`; 23 new tests; stdlib: 2,191 inherits edges
+- [ ] **<- NEXT** Graceful handling of syntax errors and unparseable files (mostly in place; needs explicit tests for odd encodings, null bytes, very large files)
 - [ ] Hand-written fixture projects in `tests/fixtures/` with known correct graphs
 - [ ] **Eval harness**: for each eval repo, hand-verify ground truth for ~30-50 symbols (true callers) in YAML; report precision/recall per confidence level
 - [ ] `glyphrift index <path>` works end to end

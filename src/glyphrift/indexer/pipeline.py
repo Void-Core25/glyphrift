@@ -2,10 +2,10 @@
 
 Records files, their symbols and their raw import statements (incremental: only new or
 changed files are parsed), then rebuilds every ``imports`` edge from those stored facts
-whenever anything changed (see ``resolve.py``), then does the same for ``calls`` edges (see
-``calls.py``), so files that depend on a changed file get correct edges without being
-re-parsed. Inheritance edges come in a later roadmap item and will follow the same pattern:
-store per-file facts, derive edges globally.
+whenever anything changed (see ``resolve.py``), then does the same for ``inherits`` edges (see
+``inherit.py``) and ``calls`` edges (see ``calls.py``, which searches the class hierarchy), so
+files that depend on a changed file get correct edges without being re-parsed. Every derived
+edge follows the same pattern: store per-file facts, derive edges globally.
 
 Only files with a supported language (currently Python) are stored.
 """
@@ -20,6 +20,7 @@ from pathlib import Path
 
 from glyphrift.indexer.calls import resolve_calls
 from glyphrift.indexer.extract import compute_module_name, extract_symbols
+from glyphrift.indexer.inherit import resolve_inheritance
 from glyphrift.indexer.resolve import resolve_imports
 from glyphrift.indexer.walker import FileRecord, walk_repo
 from glyphrift.store import transaction
@@ -36,6 +37,8 @@ class IndexStats:
     symbols_written: int = 0
     import_edges: int = 0  # import edges written by this run (0 if nothing changed)
     unresolved_imports: int = 0
+    inherit_edges: int = 0  # inheritance edges written by this run (0 if nothing changed)
+    unresolved_bases: int = 0
     call_edges: int = 0  # call edges written by this run (0 if nothing changed)
     unresolved_calls: int = 0
     parse_errors: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
@@ -84,6 +87,9 @@ def index_repo(root: str | Path, conn: sqlite3.Connection) -> IndexStats:
             resolution = resolve_imports(conn)
             stats.import_edges = resolution.edges
             stats.unresolved_imports = resolution.unresolved
+            inheritance = resolve_inheritance(conn)
+            stats.inherit_edges = inheritance.edges
+            stats.unresolved_bases = inheritance.unresolved
             call_resolution = resolve_calls(conn)
             stats.call_edges = call_resolution.edges
             stats.unresolved_calls = call_resolution.unresolved
@@ -170,6 +176,23 @@ def _index_file(
                 row_ids[call.receiver_class] if call.receiver_class is not None else None,
             )
             for call in result.calls
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO base_facts (file_id, class_symbol_id, scope_symbol_id, root, attrs, text, "
+        "line, opaque_in_symbol_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                file_id,
+                row_ids[base.cls],
+                row_ids[base.scope],
+                base.root,
+                base.attrs,
+                base.text,
+                base.line,
+                row_ids[base.opaque_in] if base.opaque_in is not None else None,
+            )
+            for base in result.bases
         ],
     )
     return True

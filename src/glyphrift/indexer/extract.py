@@ -31,7 +31,11 @@ Conventions:
 * For each call we also record whether its root name is a local variable or parameter of an
   enclosing function (``opaque_in``), because such a name shadows any module-level function
   of the same name, and whether the root is the ``self``/``cls`` parameter of an enclosing
-  method (``receiver_class``).
+  method (``receiver_class``). For ``super().x()`` the receiver class is the class of the
+  nearest enclosing method.
+* Each base-class expression of a class definition is one ``ExtractedBase`` (in source order);
+  ``Generic[T]`` is recorded as ``Generic``; keyword arguments such as ``metaclass=`` are not
+  bases. A base that is not a plain dotted name (a call, say) has no root.
 * Only the grammar of the Python running GLYPHRIFT can be parsed: code using newer syntax
   than the running interpreter is reported as a ``SyntaxError`` parse error.
 """
@@ -96,11 +100,25 @@ class ExtractedCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtractedBase:
+    """One base-class expression of a class definition (in source order)."""
+
+    cls: int  # index in ExtractionResult.symbols of the class
+    scope: int  # the scope the class is defined in: where the base expression is evaluated
+    root: str | None  # base name; None when the base is not a plain (dotted) name
+    attrs: str  # dotted attribute path after the root ("" for a plain name)
+    text: str  # the expression as written, shortened (for messages)
+    line: int
+    opaque_in: int | None  # nearest enclosing function that binds `root` as a local variable
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionResult:
     symbols: tuple[ExtractedSymbol, ...]  # symbols[0] is always the module symbol
     parse_error: str | None
     imports: tuple[ExtractedImport, ...] = ()
     calls: tuple[ExtractedCall, ...] = ()
+    bases: tuple[ExtractedBase, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +230,59 @@ def _opaque_locals(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
     return frozenset(names - declared_outer)
 
 
+def _binding_info(
+    root: str, scope: _Scope, inner_names: frozenset[str]
+) -> tuple[int | None, int | None]:
+    """(nearest function binding `root` locally, class if `root` is its self/cls parameter)."""
+    if root in inner_names:  # parameter or variable of an enclosing lambda/comprehension
+        return scope.index, None
+    current: _Scope | None = scope
+    while current is not None:
+        if current.kind in ("function", "method") and root in current.local_names:
+            receiver_class = None
+            if (
+                current.kind == "method"
+                and current.first_param == root
+                and not current.is_static
+                and current.outer is not None
+            ):
+                receiver_class = current.outer.index
+            return current.index, receiver_class
+        current = current.outer
+    return None, None
+
+
+def _base_fact(expr: ast.expr, class_index: int, scope: _Scope) -> ExtractedBase:
+    """Describe one base-class expression; subscripts (``Generic[T]``) are looked through."""
+    text = ast.unparse(expr)
+    if len(text) > 80:
+        text = text[:77] + "..."
+    target = expr
+    while isinstance(target, ast.Subscript):
+        target = target.value
+    attrs: list[str] = []
+    while isinstance(target, ast.Attribute):
+        attrs.append(target.attr)
+        target = target.value
+    attrs.reverse()
+    root: str | None = None
+    opaque_in: int | None = None
+    if isinstance(target, ast.Name):
+        root = target.id
+        opaque_in, _ = _binding_info(root, scope, frozenset())
+    else:
+        attrs = []
+    return ExtractedBase(
+        cls=class_index,
+        scope=scope.index,
+        root=root,
+        attrs=".".join(attrs),
+        text=text,
+        line=expr.lineno,
+        opaque_in=opaque_in,
+    )
+
+
 def _call_fact(call: ast.Call, scope: _Scope, inner_names: frozenset[str]) -> ExtractedCall | None:
     attrs: list[str] = []
     base: ast.expr = call.func
@@ -237,23 +308,17 @@ def _call_fact(call: ast.Call, scope: _Scope, inner_names: frozenset[str]) -> Ex
 
     opaque_in: int | None = None
     receiver_class: int | None = None
-    if root is not None and root != "super()":
-        if root in inner_names:  # parameter or variable of an enclosing lambda/comprehension
-            opaque_in = scope.index
-        else:
-            current: _Scope | None = scope
-            while current is not None:
-                if current.kind in ("function", "method") and root in current.local_names:
-                    opaque_in = current.index
-                    if (
-                        current.kind == "method"
-                        and current.first_param == root
-                        and not current.is_static
-                        and current.outer is not None
-                    ):
-                        receiver_class = current.outer.index
-                    break
-                current = current.outer
+    if root == "super()":
+        # The class whose base classes are searched: the nearest enclosing method's class.
+        current: _Scope | None = scope
+        while current is not None:
+            if current.kind == "method" and current.outer is not None:
+                opaque_in = current.index
+                receiver_class = current.outer.index
+                break
+            current = current.outer
+    elif root is not None:
+        opaque_in, receiver_class = _binding_info(root, scope, inner_names)
 
     return ExtractedCall(
         scope=scope.index,
@@ -332,6 +397,7 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
     symbols: list[ExtractedSymbol] = [module]
     imports: list[ExtractedImport] = []
     calls: list[ExtractedCall] = []
+    bases: list[ExtractedBase] = []
     module_scope = _Scope(index=0, qualified_name=module_name, kind="module")
 
     # Iterative pre-order walk: deeply nested code (long elif chains) cannot overflow the stack.
@@ -366,6 +432,7 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
             ]
             _collect_calls(header, scope, calls)
             if isinstance(node, ast.ClassDef):
+                bases.extend(_base_fact(base, len(symbols) - 1, scope) for base in node.bases)
                 inner = _Scope(
                     index=len(symbols) - 1, qualified_name=qualified, kind=kind, outer=scope
                 )
@@ -438,4 +505,5 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
         parse_error=None,
         imports=tuple(imports),
         calls=tuple(calls),
+        bases=tuple(bases),
     )

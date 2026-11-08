@@ -53,7 +53,7 @@ def main() -> None:
     )
     print(f"Files that failed to parse: {len(stats.parse_errors)}")
 
-    for kind, label in (("imports", "Import"), ("calls", "Call")):
+    for kind, label in (("imports", "Import"), ("inherits", "Inheritance"), ("calls", "Call")):
         by_confidence = dict(
             conn.execute(
                 "SELECT confidence, COUNT(*) FROM edges WHERE kind = ? GROUP BY confidence",
@@ -74,7 +74,7 @@ def main() -> None:
             print(f"  {path}: {message}")
 
     if args.unresolved:
-        for kind in ("imports", "calls"):
+        for kind in ("imports", "inherits", "calls"):
             rows = conn.execute(
                 "SELECT f.path, e.line, e.dst_name, e.how FROM edges e "
                 "JOIN files f ON f.id = e.file_id "
@@ -104,7 +104,7 @@ def main() -> None:
             label = f"{row['kind']:8} {row['name']}"
             print(f"  {indent}{label}  (lines {row['line_start']}-{row['line_end']})")
 
-        for kind, title in (("imports", "Imports"), ("calls", "Calls")):
+        for kind, title in (("imports", "Imports"), ("inherits", "Bases"), ("calls", "Calls")):
             edge_rows = conn.execute(
                 "SELECT e.line, e.confidence, e.dst_name, dst.qualified_name AS dst, e.how "
                 "FROM edges e JOIN files f ON f.id = e.file_id "
