@@ -1,8 +1,8 @@
 """Symbol extraction from Python source, using the standard-library ``ast`` module.
 
 Produces the modules, classes, functions and methods defined in a file, with line ranges,
-plus the raw facts of every import statement (resolved into edges by ``resolve.py``).
-Calls and inheritance edges are extracted by later steps.
+plus the raw facts of every import statement and every call site (resolved into edges by
+``resolve.py`` and ``calls.py``). Inheritance edges are extracted by a later step.
 
 Conventions:
 
@@ -22,6 +22,16 @@ Conventions:
   function, so an import inside a function is attributed to that function. Imports under
   ``if TYPE_CHECKING:`` are flagged. ``from __future__ import ...`` is not an import of
   anything and is skipped.
+* Each call site is one ``ExtractedCall``: the callee written as ``root`` (the base name) plus
+  ``attrs`` (the dotted attribute path), so ``f()`` is root ``f``, ``a.b.c()`` is root ``a``
+  with attrs ``b.c``, and ``make().run()`` has no root (unknown receiver) with attrs ``run``.
+  Calls through subscripts, lambdas or other calls (``handlers[k]()``, ``f()()``) are not
+  recorded. A call is attributed to the scope that *executes* it: decorators, default values
+  and base classes belong to the enclosing scope, not to the function they decorate.
+* For each call we also record whether its root name is a local variable or parameter of an
+  enclosing function (``opaque_in``), because such a name shadows any module-level function
+  of the same name, and whether the root is the ``self``/``cls`` parameter of an enclosing
+  method (``receiver_class``).
 * Only the grammar of the Python running GLYPHRIFT can be parsed: code using newer syntax
   than the running interpreter is reported as a ``SyntaxError`` parse error.
 """
@@ -31,6 +41,7 @@ from __future__ import annotations
 import ast
 import re
 import warnings
+from collections.abc import Iterable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -41,6 +52,8 @@ SymbolKind = Literal["module", "class", "function", "method"]
 _DEFINITIONS = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
 # Nodes that can contain further statements. Expressions never contain definitions.
 _STATEMENT_CONTAINERS = (ast.stmt, ast.excepthandler, ast.match_case)
+
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
 _BYTES_NEWLINE = re.compile(rb"\r\n|\r|\n")
 _TEXT_NEWLINE = re.compile(r"\r\n|\r|\n")
@@ -71,10 +84,23 @@ class ExtractedImport:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtractedCall:
+    """One call site."""
+
+    scope: int  # index in ExtractionResult.symbols of the scope that executes the call
+    root: str | None  # base name; "super()" for super().x(); None for an unknown base expression
+    attrs: str  # dotted attribute path after the root ("" for a bare call such as f())
+    line: int
+    opaque_in: int | None  # nearest enclosing function that binds `root` as a local variable
+    receiver_class: int | None  # class symbol index when `root` is the self/cls parameter
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionResult:
     symbols: tuple[ExtractedSymbol, ...]  # symbols[0] is always the module symbol
     parse_error: str | None
     imports: tuple[ExtractedImport, ...] = ()
+    calls: tuple[ExtractedCall, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +108,10 @@ class _Scope:
     index: int
     qualified_name: str
     kind: SymbolKind
+    outer: _Scope | None = None
+    local_names: frozenset[str] = frozenset()  # parameters and assigned variables (functions)
+    first_param: str | None = None  # name of the first positional parameter (functions)
+    is_static: bool = False  # decorated with @staticmethod
 
 
 def compute_module_name(rel_path: str, python_files: AbstractSet[str]) -> str:
@@ -126,6 +156,150 @@ def _is_type_checking_guard(test: ast.expr) -> bool:
     return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
 
 
+def _parameter_names(args: ast.arguments) -> list[str]:
+    names = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+    if args.vararg:
+        names.append(args.vararg.arg)
+    if args.kwarg:
+        names.append(args.kwarg.arg)
+    return names
+
+
+def _is_staticmethod(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for decorator in node.decorator_list:
+        if isinstance(decorator, ast.Name) and decorator.id == "staticmethod":
+            return True
+        if isinstance(decorator, ast.Attribute) and decorator.attr == "staticmethod":
+            return True
+    return False
+
+
+def _opaque_locals(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
+    """Names a function binds as local variables: parameters and assigned names.
+
+    Names bound only by ``def``/``class``/``import`` statements are not included: those are
+    symbols or import facts that the resolvers understand. Names declared ``global`` or
+    ``nonlocal`` are excluded. Nested function, class and lambda bodies are other scopes.
+    """
+    names = set(_parameter_names(func.args))
+    declared_outer: set[str] = set()
+    stack: list[ast.AST] = list(reversed(func.body))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared_outer.update(node.names)
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+        elif isinstance(node, _COMPREHENSIONS):
+            # Comprehension variables are local to the comprehension, but a walrus inside
+            # binds in the enclosing function, so the rest of the expression is still scanned.
+            elements = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+            for generator in node.generators:
+                stack.append(generator.iter)
+                stack.extend(generator.ifs)
+            stack.extend(elements)
+        else:
+            if isinstance(node, ast.ExceptHandler) and node.name:
+                names.add(node.name)
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                names.add(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                names.add(node.rest)
+            stack.extend(ast.iter_child_nodes(node))
+    return frozenset(names - declared_outer)
+
+
+def _call_fact(call: ast.Call, scope: _Scope, inner_names: frozenset[str]) -> ExtractedCall | None:
+    attrs: list[str] = []
+    base: ast.expr = call.func
+    while isinstance(base, ast.Attribute):
+        attrs.append(base.attr)
+        base = base.value
+    attrs.reverse()
+
+    root: str | None
+    if isinstance(base, ast.Name):
+        root = base.id
+    elif (
+        attrs
+        and isinstance(base, ast.Call)
+        and isinstance(base.func, ast.Name)
+        and base.func.id == "super"
+    ):
+        root = "super()"
+    elif attrs:
+        root = None  # e.g. make().run(), items[0].run(), "text".join(): unknown receiver
+    else:
+        return None  # callee is a call result, subscript or lambda: not recorded
+
+    opaque_in: int | None = None
+    receiver_class: int | None = None
+    if root is not None and root != "super()":
+        if root in inner_names:  # parameter or variable of an enclosing lambda/comprehension
+            opaque_in = scope.index
+        else:
+            current: _Scope | None = scope
+            while current is not None:
+                if current.kind in ("function", "method") and root in current.local_names:
+                    opaque_in = current.index
+                    if (
+                        current.kind == "method"
+                        and current.first_param == root
+                        and not current.is_static
+                        and current.outer is not None
+                    ):
+                        receiver_class = current.outer.index
+                    break
+                current = current.outer
+
+    return ExtractedCall(
+        scope=scope.index,
+        root=root,
+        attrs=".".join(attrs),
+        line=call.lineno,
+        opaque_in=opaque_in,
+        receiver_class=receiver_class,
+    )
+
+
+def _collect_calls(roots: Iterable[ast.AST], scope: _Scope, out: list[ExtractedCall]) -> None:
+    """Record every call in the given expression trees, attributed to ``scope``."""
+    stack: list[tuple[ast.AST, frozenset[str]]] = [
+        (root, frozenset()) for root in reversed(list(roots))
+    ]
+    while stack:
+        node, inner = stack.pop()
+        if isinstance(node, ast.Call):
+            call = _call_fact(node, scope, inner)
+            if call is not None:
+                out.append(call)
+        if isinstance(node, ast.Lambda):
+            bound = inner | frozenset(_parameter_names(node.args))
+            defaults = [*node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
+            stack.append((node.body, bound))
+            stack.extend((default, inner) for default in reversed(defaults))
+        elif isinstance(node, _COMPREHENSIONS):
+            targets = {
+                n.id
+                for generator in node.generators
+                for n in ast.walk(generator.target)
+                if isinstance(n, ast.Name)
+            }
+            bound = inner | frozenset(targets)
+            elements = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+            parts: list[tuple[ast.AST, frozenset[str]]] = []
+            for index, generator in enumerate(node.generators):
+                parts.append((generator.iter, inner if index == 0 else bound))
+                parts.extend((condition, bound) for condition in generator.ifs)
+            parts.extend((element, bound) for element in elements)
+            stack.extend(reversed(parts))
+        else:
+            stack.extend((child, inner) for child in reversed(list(ast.iter_child_nodes(node))))
+
+
 def _describe_error(exc: Exception) -> str:
     if isinstance(exc, SyntaxError):
         where = f" (line {exc.lineno})" if exc.lineno else ""
@@ -157,6 +331,7 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
 
     symbols: list[ExtractedSymbol] = [module]
     imports: list[ExtractedImport] = []
+    calls: list[ExtractedCall] = []
     module_scope = _Scope(index=0, qualified_name=module_name, kind="module")
 
     # Iterative pre-order walk: deeply nested code (long elif chains) cannot overflow the stack.
@@ -185,10 +360,30 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
                     parent=scope.index,
                 )
             )
-            inner = _Scope(index=len(symbols) - 1, qualified_name=qualified, kind=kind)
+            # Decorators, defaults, annotations and base classes run in the enclosing scope.
+            header = [
+                child for child in ast.iter_child_nodes(node) if not isinstance(child, ast.stmt)
+            ]
+            _collect_calls(header, scope, calls)
+            if isinstance(node, ast.ClassDef):
+                inner = _Scope(
+                    index=len(symbols) - 1, qualified_name=qualified, kind=kind, outer=scope
+                )
+            else:
+                positional = [*node.args.posonlyargs, *node.args.args]
+                inner = _Scope(
+                    index=len(symbols) - 1,
+                    qualified_name=qualified,
+                    kind=kind,
+                    outer=scope,
+                    local_names=_opaque_locals(node),
+                    first_param=positional[0].arg if positional else None,
+                    is_static=_is_staticmethod(node),
+                )
             stack.extend(
                 (child, inner, in_type_checking)
                 for child in reversed(list(ast.iter_child_nodes(node)))
+                if isinstance(child, _STATEMENT_CONTAINERS)
             )
         elif isinstance(node, ast.Import):
             for alias in node.names:
@@ -226,9 +421,21 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
             stack.extend((child, scope, in_type_checking) for child in reversed(node.orelse))
             stack.extend((child, scope, True) for child in reversed(node.body))
         elif isinstance(node, _STATEMENT_CONTAINERS):
+            children = list(ast.iter_child_nodes(node))
+            _collect_calls(
+                [child for child in children if not isinstance(child, _STATEMENT_CONTAINERS)],
+                scope,
+                calls,
+            )
             stack.extend(
                 (child, scope, in_type_checking)
-                for child in reversed(list(ast.iter_child_nodes(node)))
+                for child in reversed(children)
+                if isinstance(child, _STATEMENT_CONTAINERS)
             )
 
-    return ExtractionResult(symbols=tuple(symbols), parse_error=None, imports=tuple(imports))
+    return ExtractionResult(
+        symbols=tuple(symbols),
+        parse_error=None,
+        imports=tuple(imports),
+        calls=tuple(calls),
+    )

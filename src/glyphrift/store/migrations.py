@@ -114,9 +114,32 @@ CREATE INDEX idx_import_facts_file_id ON import_facts(file_id);
 CREATE INDEX idx_import_facts_scope   ON import_facts(scope_symbol_id);
 """
 
+_V3_CALL_FACTS = """
+DELETE FROM files;
+
+-- Raw call sites. Call edges are derived from these (and from symbols and import facts) by
+-- resolve_calls() and are rebuilt whenever any file changes.
+CREATE TABLE call_facts (
+    id                       INTEGER PRIMARY KEY,
+    file_id                  INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    scope_symbol_id          INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    root                     TEXT,              -- base name; 'super()'; NULL = unknown base
+    attrs                    TEXT    NOT NULL,  -- dotted attribute path after the root, or ''
+    line                     INTEGER NOT NULL CHECK (line >= 1),
+    -- nearest enclosing function binding `root` as a local variable/parameter (shadows
+    -- module-level names), and the class when `root` is that method's self/cls parameter
+    opaque_in_symbol_id      INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+    receiver_class_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+    CHECK (root IS NOT NULL OR attrs != ''),
+    CHECK (receiver_class_symbol_id IS NULL OR opaque_in_symbol_id IS NOT NULL)
+);
+CREATE INDEX idx_call_facts_file_id ON call_facts(file_id);
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema: files, symbols, edges, findings", _V1_INITIAL_SCHEMA),
     Migration(2, "import_facts table; clears the index so it is rebuilt", _V2_IMPORT_FACTS),
+    Migration(3, "call_facts table; clears the index so it is rebuilt", _V3_CALL_FACTS),
 )
 
 SCHEMA_VERSION: int = MIGRATIONS[-1].version

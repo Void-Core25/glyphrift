@@ -1,6 +1,8 @@
 """Repository indexing: file discovery, parsing and import/call extraction."""
 
+from glyphrift.indexer.calls import CallResolutionStats, resolve_calls
 from glyphrift.indexer.extract import (
+    ExtractedCall,
     ExtractedImport,
     ExtractedSymbol,
     ExtractionResult,
@@ -19,6 +21,8 @@ from glyphrift.indexer.walker import (
 
 __all__ = [
     "DEFAULT_SKIP_DIRS",
+    "CallResolutionStats",
+    "ExtractedCall",
     "ExtractedImport",
     "ExtractedSymbol",
     "ExtractionResult",
@@ -30,6 +34,7 @@ __all__ = [
     "extract_symbols",
     "hash_file",
     "index_repo",
+    "resolve_calls",
     "resolve_imports",
     "walk_repo",
 ]

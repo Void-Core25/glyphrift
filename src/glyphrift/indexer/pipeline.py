@@ -2,9 +2,10 @@
 
 Records files, their symbols and their raw import statements (incremental: only new or
 changed files are parsed), then rebuilds every ``imports`` edge from those stored facts
-whenever anything changed (see ``resolve.py``), so files that depend on a changed file get
-correct edges without being re-parsed. Call and inheritance edges come in later roadmap items
-and will follow the same pattern: store per-file facts, derive edges globally.
+whenever anything changed (see ``resolve.py``), then does the same for ``calls`` edges (see
+``calls.py``), so files that depend on a changed file get correct edges without being
+re-parsed. Inheritance edges come in a later roadmap item and will follow the same pattern:
+store per-file facts, derive edges globally.
 
 Only files with a supported language (currently Python) are stored.
 """
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from glyphrift.indexer.calls import resolve_calls
 from glyphrift.indexer.extract import compute_module_name, extract_symbols
 from glyphrift.indexer.resolve import resolve_imports
 from glyphrift.indexer.walker import FileRecord, walk_repo
@@ -32,8 +34,10 @@ class IndexStats:
     files_unchanged: int = 0
     files_removed: int = 0
     symbols_written: int = 0
-    import_edges: int = 0  # import edges currently written by this run (0 if nothing changed)
+    import_edges: int = 0  # import edges written by this run (0 if nothing changed)
     unresolved_imports: int = 0
+    call_edges: int = 0  # call edges written by this run (0 if nothing changed)
+    unresolved_calls: int = 0
     parse_errors: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
 
 
@@ -80,6 +84,9 @@ def index_repo(root: str | Path, conn: sqlite3.Connection) -> IndexStats:
             resolution = resolve_imports(conn)
             stats.import_edges = resolution.edges
             stats.unresolved_imports = resolution.unresolved
+            call_resolution = resolve_calls(conn)
+            stats.call_edges = call_resolution.edges
+            stats.unresolved_calls = call_resolution.unresolved
     return stats
 
 
@@ -147,6 +154,22 @@ def _index_file(
                 int(imp.type_checking),
             )
             for imp in result.imports
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO call_facts (file_id, scope_symbol_id, root, attrs, line, "
+        "opaque_in_symbol_id, receiver_class_symbol_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                file_id,
+                row_ids[call.scope],
+                call.root,
+                call.attrs,
+                call.line,
+                row_ids[call.opaque_in] if call.opaque_in is not None else None,
+                row_ids[call.receiver_class] if call.receiver_class is not None else None,
+            )
+            for call in result.calls
         ],
     )
     return True

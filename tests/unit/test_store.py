@@ -359,3 +359,35 @@ def test_migrating_from_v1_clears_the_derived_index() -> None:
 
     assert raw.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0  # rebuilt next index run
     raw.close()
+
+
+def test_call_fact_shapes_are_validated(conn: sqlite3.Connection) -> None:
+    file_id = add_file(conn)
+    scope = add_symbol(conn, file_id, "mod", kind="module")
+    insert = (
+        "INSERT INTO call_facts (file_id, scope_symbol_id, root, attrs, line, "
+        "opaque_in_symbol_id, receiver_class_symbol_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    conn.execute(insert, (file_id, scope, "f", "", 1, None, None))  # valid
+    bad_rows = [
+        (file_id, scope, None, "", 1, None, None),  # no root and no attributes
+        (file_id, scope, "f", "", 0, None, None),  # line < 1
+        (file_id, scope, "self", "x", 1, None, scope),  # receiver class without opaque scope
+    ]
+    for row in bad_rows:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(insert, row)
+
+
+def test_deleting_a_file_removes_its_call_facts(conn: sqlite3.Connection) -> None:
+    file_id = add_file(conn)
+    scope = add_symbol(conn, file_id, "mod", kind="module")
+    conn.execute(
+        "INSERT INTO call_facts (file_id, scope_symbol_id, root, attrs, line) "
+        "VALUES (?, ?, 'f', '', 1)",
+        (file_id, scope),
+    )
+
+    conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+
+    assert count(conn, "call_facts") == 0

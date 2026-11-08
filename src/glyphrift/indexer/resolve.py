@@ -36,12 +36,12 @@ _RANK = {"resolved": 3, "inferred": 2, "heuristic": 1}
 _MAX_DEPTH = 25
 
 
-def _weakest(*levels: str) -> str:
+def weakest(*levels: str) -> str:
     return min(levels, key=_RANK.__getitem__)
 
 
 @dataclass(frozen=True, slots=True)
-class _Module:
+class Module:
     symbol_id: int
     file_id: int
     name: str
@@ -49,7 +49,7 @@ class _Module:
 
 
 @dataclass(frozen=True, slots=True)
-class _Fact:
+class ImportFact:
     file_id: int
     scope_symbol_id: int
     scope_kind: str
@@ -74,7 +74,7 @@ class _Fact:
 
 
 @dataclass(frozen=True, slots=True)
-class _Hit:
+class Hit:
     symbol_id: int
     confidence: str
     note: str
@@ -93,7 +93,7 @@ class ImportResolutionStats:
     by_confidence: dict[str, int] = field(default_factory=dict)
 
 
-def _target_module_name(fact: _Fact, importer: _Module) -> tuple[str | None, str | None]:
+def target_module_name(fact: ImportFact, importer: Module) -> tuple[str | None, str | None]:
     """Absolute module name an import statement refers to, or (None, reason) if invalid."""
     if fact.level == 0:
         return fact.module, None
@@ -108,22 +108,22 @@ def _target_module_name(fact: _Fact, importer: _Module) -> tuple[str | None, str
     return ".".join([*base, fact.module] if fact.module else base), None
 
 
-def _external_reason(module_name: str) -> str:
+def external_reason(module_name: str) -> str:
     top = module_name.split(".")[0]
     if top in sys.stdlib_module_names:
         return f"standard library module '{top}'"
     return f"'{top}' not found in the repository (third-party, generated or missing)"
 
 
-class _Resolver:
+class NamespaceResolver:
     def __init__(self, conn: sqlite3.Connection) -> None:
-        self.modules_by_name: dict[str, list[_Module]] = {}
-        self.module_of_file: dict[int, _Module] = {}
+        self.modules_by_name: dict[str, list[Module]] = {}
+        self.module_of_file: dict[int, Module] = {}
         for row in conn.execute(
             "SELECT s.id, s.file_id, s.qualified_name, f.path FROM symbols s "
             "JOIN files f ON f.id = s.file_id WHERE s.kind = 'module' ORDER BY s.id"
         ):
-            module = _Module(
+            module = Module(
                 symbol_id=row["id"],
                 file_id=row["file_id"],
                 name=row["qualified_name"],
@@ -141,18 +141,24 @@ class _Resolver:
         ):
             self.defs.setdefault(row["parent_id"], {}).setdefault(row["name"], []).append(row["id"])
 
-        self.facts: list[_Fact] = []
+        self.module_by_symbol: dict[int, Module] = {
+            m.symbol_id: m for modules in self.modules_by_name.values() for m in modules
+        }
+
+        self.facts: list[ImportFact] = []
+        # Imports inside functions/classes: scope symbol -> bound name -> facts
+        self.local_bindings: dict[int, dict[str, list[ImportFact]]] = {}
         self.bindings: dict[
-            int, dict[str, list[_Fact]]
+            int, dict[str, list[ImportFact]]
         ] = {}  # module symbol -> bound name -> facts
-        self.stars: dict[int, list[_Fact]] = {}  # module symbol -> `from X import *` facts
+        self.stars: dict[int, list[ImportFact]] = {}  # module symbol -> `from X import *` facts
         for row in conn.execute(
             "SELECT i.file_id, i.scope_symbol_id, s.kind AS scope_kind, i.kind, i.level, "
             "i.module, i.name, i.asname, i.line, i.type_checking "
             "FROM import_facts i JOIN symbols s ON s.id = i.scope_symbol_id "
             "ORDER BY i.file_id, i.id"
         ):
-            fact = _Fact(
+            fact = ImportFact(
                 file_id=row["file_id"],
                 scope_symbol_id=row["scope_symbol_id"],
                 scope_kind=row["scope_kind"],
@@ -166,7 +172,18 @@ class _Resolver:
             )
             self.facts.append(fact)
             if fact.scope_kind != "module":
-                continue  # only module-level imports bind names other modules can import
+                # Function/class-level imports bind names only inside that scope.
+                if fact.name != "*":
+                    bound_local = fact.asname or (
+                        fact.module.split(".")[0]
+                        if fact.kind == "import" and fact.module
+                        else fact.name
+                    )
+                    if bound_local:
+                        self.local_bindings.setdefault(fact.scope_symbol_id, {}).setdefault(
+                            bound_local, []
+                        ).append(fact)
+                continue
             if fact.kind == "import":
                 assert fact.module is not None
                 bound = fact.asname or fact.module.split(".")[0]
@@ -182,12 +199,19 @@ class _Resolver:
 
     def resolve_name(
         self,
-        module: _Module,
+        module: Module,
         name: str,
         seen: frozenset[tuple[int, str]] = frozenset(),
         depth: int = 0,
-    ) -> list[_Hit]:
-        """Symbols that ``from <module> import <name>`` can refer to."""
+        *,
+        allow_submodule: bool = True,
+    ) -> list[Hit]:
+        """Symbols that ``from <module> import <name>`` can refer to.
+
+        With ``allow_submodule=False`` this is the lookup of a bare name used *inside* the
+        module (its own definitions, import bindings and star imports), where a submodule is
+        not an implicit name.
+        """
         key = (module.symbol_id, name)
         if key in seen or depth > _MAX_DEPTH:
             return []
@@ -196,41 +220,41 @@ class _Resolver:
         defined = self.defs.get(module.symbol_id, {}).get(name)
         if defined:
             if len(defined) == 1:
-                return [_Hit(defined[0], "resolved", f"defined in {module.name}")]
+                return [Hit(defined[0], "resolved", f"defined in {module.name}")]
             note = f"defined {len(defined)} times in {module.name} (conditional definitions)"
-            return [_Hit(symbol_id, "inferred", note) for symbol_id in defined]
+            return [Hit(symbol_id, "inferred", note) for symbol_id in defined]
 
-        hits: list[_Hit] = []
+        hits: list[Hit] = []
         for fact in self.bindings.get(module.symbol_id, {}).get(name, ()):
-            hits.extend(self._follow_binding(module, fact, seen, depth))
+            hits.extend(self.follow_binding(module, fact, seen, depth))
         if hits:
             if len({hit.symbol_id for hit in hits}) > 1:  # alternatives (try/except imports)
-                hits = [replace(h, confidence=_weakest(h.confidence, "inferred")) for h in hits]
+                hits = [replace(h, confidence=weakest(h.confidence, "inferred")) for h in hits]
             return hits
 
-        if module.is_package:
+        if module.is_package and allow_submodule:
             submodules = self.modules_by_name.get(f"{module.name}.{name}", [])
             if submodules:
                 conf = "resolved" if len(submodules) == 1 else "heuristic"
-                return [_Hit(m.symbol_id, conf, f"submodule of {module.name}") for m in submodules]
+                return [Hit(m.symbol_id, conf, f"submodule of {module.name}") for m in submodules]
 
         for fact in self.stars.get(module.symbol_id, ()):
-            target, _ = _target_module_name(fact, module)
+            target, _ = target_module_name(fact, module)
             for candidate in self.modules_by_name.get(target or "", []):
                 for sub in self.resolve_name(candidate, name, seen, depth + 1):
                     hits.append(
                         replace(
                             sub,
-                            confidence=_weakest(sub.confidence, "inferred"),
+                            confidence=weakest(sub.confidence, "inferred"),
                             note=f"{sub.note} (name arrives via a star import)",
                             via=(module.name, *sub.via),
                         )
                     )
         return hits
 
-    def _follow_binding(
-        self, module: _Module, fact: _Fact, seen: frozenset[tuple[int, str]], depth: int
-    ) -> list[_Hit]:
+    def follow_binding(
+        self, module: Module, fact: ImportFact, seen: frozenset[tuple[int, str]], depth: int
+    ) -> list[Hit]:
         """Where a module-level import in ``module`` sends the name it binds."""
         if fact.kind == "import":
             assert fact.module is not None
@@ -238,22 +262,31 @@ class _Resolver:
             candidates = self.modules_by_name.get(target, [])
             conf = "resolved" if len(candidates) == 1 else "heuristic"
             note = f"module imported by `{fact.statement()}` in {module.name}"
-            return [_Hit(m.symbol_id, conf, note) for m in candidates]
+            return [Hit(m.symbol_id, conf, note) for m in candidates]
 
-        target, _ = _target_module_name(fact, module)
+        target, _ = target_module_name(fact, module)
         if target is None or fact.name is None:
             return []
         candidates = self.modules_by_name.get(target, [])
-        hits: list[_Hit] = []
+        hits: list[Hit] = []
         for candidate in candidates:
             for sub in self.resolve_name(candidate, fact.name, seen, depth + 1):
                 conf = (
-                    sub.confidence
-                    if len(candidates) == 1
-                    else _weakest(sub.confidence, "heuristic")
+                    sub.confidence if len(candidates) == 1 else weakest(sub.confidence, "heuristic")
                 )
                 hits.append(replace(sub, confidence=conf, via=(module.name, *sub.via)))
         return hits
+
+    def external_target(self, fact: ImportFact, importer: Module) -> str | None:
+        """Absolute module name of an import fact if that module is not in the repository."""
+        if fact.kind == "from" and fact.name == "*":
+            return None
+        target, _ = target_module_name(fact, importer)
+        if target is None:
+            return None
+        if fact.kind == "import" and not fact.asname:
+            target = target.split(".")[0]
+        return target if target not in self.modules_by_name else None
 
     # -- edge generation ---------------------------------------------------------------
 
@@ -261,7 +294,9 @@ class _Resolver:
         rows: list[tuple[object, ...]] = []
         seen: set[tuple[int, int | None, str, int]] = set()
 
-        def add(fact: _Fact, dst: int | None, dst_name: str, confidence: str, how: str) -> None:
+        def add(
+            fact: ImportFact, dst: int | None, dst_name: str, confidence: str, how: str
+        ) -> None:
             key = (fact.scope_symbol_id, dst, dst_name, fact.line)
             if key in seen:
                 return
@@ -282,7 +317,7 @@ class _Resolver:
 
         for fact in self.facts:
             importer = self.module_of_file[fact.file_id]
-            target, error = _target_module_name(fact, importer)
+            target, error = target_module_name(fact, importer)
             written = fact.written_module
             module_stmt = fact.statement(with_names=False)
 
@@ -292,7 +327,7 @@ class _Resolver:
 
             candidates = self.modules_by_name.get(target, [])
             if not candidates:
-                add(fact, None, written, "unresolved", f"{module_stmt}: {_external_reason(target)}")
+                add(fact, None, written, "unresolved", f"{module_stmt}: {external_reason(target)}")
                 continue
 
             unique = len(candidates) == 1
@@ -309,7 +344,7 @@ class _Resolver:
                 assert fact.name is not None
                 for candidate in candidates:
                     for hit in self.resolve_name(candidate, fact.name):
-                        conf = hit.confidence if unique else _weakest(hit.confidence, "heuristic")
+                        conf = hit.confidence if unique else weakest(hit.confidence, "heuristic")
                         add(
                             fact,
                             hit.symbol_id,
@@ -322,7 +357,7 @@ class _Resolver:
 
 def resolve_imports(conn: sqlite3.Connection) -> ImportResolutionStats:
     """Rebuild all ``imports`` edges. Call inside a transaction."""
-    rows = _Resolver(conn).build_edges()
+    rows = NamespaceResolver(conn).build_edges()
     conn.execute("DELETE FROM edges WHERE kind = 'imports'")
     conn.executemany(
         "INSERT INTO edges (src_symbol_id, dst_symbol_id, dst_name, kind, confidence, how, "
