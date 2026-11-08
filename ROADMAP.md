@@ -31,8 +31,8 @@ Goal: reliably extract Python structure, and be able to *measure* correctness.
 - [x] Call extraction with confidence labels (`resolved` / `inferred` / `heuristic` / `unresolved`): `call_facts` table (schema v3), `indexer/calls.py`, 18 new tests; stdlib: 30,589 call edges in about 4 s. Precision still to be measured by the eval harness
 - [x] Inheritance edges; `self.method()` / `super()` resolution through class hierarchy: `base_facts` table (schema v4), `indexer/inherit.py`, `indexer/lookup.py`; 23 new tests; stdlib: 2,191 inherits edges
 - [x] Graceful handling of syntax errors and unparseable files: hostile-input probe found and fixed 2 crashes (deeply nested bases, non-UTF-8 file names); size limit; 24 tests in `tests/unit/test_robustness.py`
-- [ ] **<- NEXT** Hand-written fixture projects in `tests/fixtures/` with known correct graphs
-- [ ] **Eval harness**: for each eval repo, hand-verify ground truth for ~30-50 symbols (true callers) in YAML; report precision/recall per confidence level
+- [x] Hand-written fixture projects in `tests/fixtures/` with known correct graphs: 5 projects (`calls_basic`, `shop`, `zoo`, `limits`, `src_layout`), expectations as inline `# =>` markers, exact comparison
+- [ ] **<- NEXT** **Eval harness**: for each eval repo, hand-verify ground truth for ~30-50 symbols (true callers) in YAML; report precision/recall per confidence level
 - [ ] `glyphrift index <path>` works end to end
 
 **Exit:** all 5 eval repos index without crashing; eval report exists; `resolved` edges have **>=95% precision** on ground truth (if lower, fix before moving on); index times recorded.
