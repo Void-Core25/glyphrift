@@ -141,6 +141,11 @@ def walk_repo(
     for rel in sorted(set(relative_paths)):
         if _in_skipped_dir(rel, skip_dirs):
             continue
+        try:
+            rel.encode("utf-8")
+        except UnicodeEncodeError:
+            logger.warning("Skipping file whose name is not valid UTF-8: %r", rel)
+            continue
         full = root_path / rel
         # Skips symlinks, directories (e.g. git submodules) and files deleted from disk.
         if full.is_symlink() or not full.is_file():

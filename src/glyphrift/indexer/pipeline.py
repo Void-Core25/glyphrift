@@ -19,13 +19,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from glyphrift.indexer.calls import resolve_calls
-from glyphrift.indexer.extract import compute_module_name, extract_symbols
+from glyphrift.indexer.extract import ExtractionResult, compute_module_name, extract_symbols
 from glyphrift.indexer.inherit import resolve_inheritance
 from glyphrift.indexer.resolve import resolve_imports
 from glyphrift.indexer.walker import FileRecord, walk_repo
 from glyphrift.store import transaction
 
 logger = logging.getLogger(__name__)
+
+# Larger files (generated code, data dumps) are recorded but not parsed: parsing needs memory
+# proportional to the file, and such files rarely matter for a code graph.
+DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -44,12 +48,18 @@ class IndexStats:
     parse_errors: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
 
 
-def index_repo(root: str | Path, conn: sqlite3.Connection) -> IndexStats:
+def index_repo(
+    root: str | Path,
+    conn: sqlite3.Connection,
+    *,
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+) -> IndexStats:
     """Bring the index in ``conn`` up to date with the repository at ``root``.
 
     A file is re-indexed when it is new, its content hash changed, or its module name changed
     (adding or removing an ``__init__.py`` renames the modules below it). Files that no longer
-    exist (or are now ignored) are removed. The whole run is one transaction.
+    exist (or are now ignored) are removed. Files larger than ``max_file_bytes`` are stored
+    with a ``parse_error`` saying so and are not parsed. The whole run is one transaction.
     """
     root_path = Path(root)
     records = [r for r in walk_repo(root_path) if r.language is not None]
@@ -77,7 +87,9 @@ def index_repo(root: str | Path, conn: sqlite3.Connection) -> IndexStats:
             if previous is not None and previous[1] == record.sha256 and previous[2] == module_name:
                 stats.files_unchanged += 1
                 continue
-            written = _index_file(root_path, record, module_name, previous, conn, indexed_at, stats)
+            written = _index_file(
+                root_path, record, module_name, previous, conn, indexed_at, stats, max_file_bytes
+            )
             if written and previous is None:
                 stats.files_added += 1
             elif written:
@@ -104,14 +116,21 @@ def _index_file(
     conn: sqlite3.Connection,
     indexed_at: str,
     stats: IndexStats,
+    max_file_bytes: int,
 ) -> bool:
-    try:
-        data = (root / record.path).read_bytes()
-    except OSError as exc:
-        logger.warning("Skipping unreadable file %s: %s", record.path, exc)
-        return False
-
-    result = extract_symbols(data, module_name)
+    data = b""
+    if record.size > max_file_bytes:
+        result = ExtractionResult(
+            symbols=extract_symbols(b"", module_name).symbols,
+            parse_error=f"file too large to index ({record.size} bytes > {max_file_bytes})",
+        )
+    else:
+        try:
+            data = (root / record.path).read_bytes()
+        except OSError as exc:
+            logger.warning("Skipping unreadable file %s: %s", record.path, exc)
+            return False
+        result = extract_symbols(data, module_name)
     if result.parse_error is not None:
         stats.parse_errors.append((record.path, result.parse_error))
 
@@ -120,7 +139,7 @@ def _index_file(
     cursor = conn.execute(
         "INSERT INTO files (path, language, sha256, size, indexed_at, parse_error) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (record.path, record.language, record.sha256, len(data), indexed_at, result.parse_error),
+        (record.path, record.language, record.sha256, record.size, indexed_at, result.parse_error),
     )
     file_id = cursor.lastrowid
 

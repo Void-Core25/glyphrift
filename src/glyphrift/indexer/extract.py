@@ -254,7 +254,10 @@ def _binding_info(
 
 def _base_fact(expr: ast.expr, class_index: int, scope: _Scope) -> ExtractedBase:
     """Describe one base-class expression; subscripts (``Generic[T]``) are looked through."""
-    text = ast.unparse(expr)
+    try:
+        text = ast.unparse(expr)
+    except RecursionError:  # absurdly nested expression
+        text = "<deeply nested expression>"
     if len(text) > 80:
         text = text[:77] + "..."
     target = expr
@@ -372,12 +375,8 @@ def _describe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
-    """Extract the symbols defined in one Python source file.
-
-    ``source`` may be bytes (preferred: encoding declarations and BOMs are honoured) or text.
-    """
-    module = ExtractedSymbol(
+def _module_symbol(source: bytes | str, module_name: str) -> ExtractedSymbol:
+    return ExtractedSymbol(
         kind="module",
         name=module_name.rsplit(".", 1)[-1],
         qualified_name=module_name,
@@ -385,6 +384,25 @@ def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
         line_end=max(1, _count_lines(source)),
         parent=None,
     )
+
+
+def extract_symbols(source: bytes | str, module_name: str) -> ExtractionResult:
+    """Extract the symbols defined in one Python source file.
+
+    ``source`` may be bytes (preferred: encoding declarations and BOMs are honoured) or text.
+    """
+    try:
+        return _extract(source, module_name)
+    except (RecursionError, MemoryError) as exc:
+        # Pathological input exhausted a resource limit. Report it like a parse failure
+        # (module symbol only, nothing else) rather than aborting the whole indexing run.
+        return ExtractionResult(
+            symbols=(_module_symbol(source, module_name),), parse_error=_describe_error(exc)
+        )
+
+
+def _extract(source: bytes | str, module_name: str) -> ExtractionResult:
+    module = _module_symbol(source, module_name)
     try:
         with warnings.catch_warnings():
             # Old code is full of '\d'-style escapes; the parser would warn about each one.
