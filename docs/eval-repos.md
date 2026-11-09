@@ -15,16 +15,30 @@ the ground truth.
 
 ## Local checkout
 
-Clones go in `eval_repos/` (git-ignored). To check out a pinned commit:
+Clones go in `eval_repos/` (git-ignored). `scripts/clone_eval_repos.ps1` clones every repo in the
+table above and checks out the pinned commit (safe to re-run; it prints `OK` or `MISMATCH` per
+repo):
 
 ```
-git clone <url> eval_repos/<name>
-git -C eval_repos/<name> checkout <commit>
+powershell -ExecutionPolicy Bypass -File scripts\clone_eval_repos.ps1
 ```
 
-A script to automate this will be added with the Phase 1 eval harness.
+## Measuring accuracy
 
-## Ground truth
+Accuracy is measured by sampling, not by judging every edge:
 
-Hand-verified ground truth (true callers of ~30-50 symbols per repo) goes in
-`tests/eval/ground_truth/<name>.yaml`. Not started; Phase 1.
+1. `uv run python scripts/eval_sample.py eval_repos/<name>` indexes the repo and draws a seeded
+   random sample of edges per kind and confidence (calls: 30 resolved, 20 each inferred /
+   heuristic / unresolved; inherits and imports: 8 each; tests and docs code is not sampled).
+   It writes `tests/eval/labels/<name>.json`. Re-running with the same seed and commit gives the
+   same sample and keeps existing labels.
+2. Every entry gets `label` (`correct` / `wrong` / `unsure`), `by` (who judged) and optionally
+   `note`. Meanings are in `src/glyphrift/evaluation.py`.
+3. `uv run python scripts/eval_report.py --repos-dir eval_repos` writes `docs/eval-report.md`:
+   precision per kind and confidence with a 95% Wilson interval, whether each checkout is at its
+   pinned commit, index size and timings, and the Phase 1 verdict (`resolved` call edges >= 95%
+   precision, needs at least 100 decided labels).
+
+Precision from sampling says how often an edge is right. It does not say how many true calls are
+missing (recall); that is a separate check on the callers of ~30 chosen symbols per repo.
+Labels are only valid for the pinned commit: do not change a hash without discarding the labels.

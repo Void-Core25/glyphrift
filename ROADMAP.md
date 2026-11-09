@@ -32,10 +32,12 @@ Goal: reliably extract Python structure, and be able to *measure* correctness.
 - [x] Inheritance edges; `self.method()` / `super()` resolution through class hierarchy: `base_facts` table (schema v4), `indexer/inherit.py`, `indexer/lookup.py`; 23 new tests; stdlib: 2,191 inherits edges
 - [x] Graceful handling of syntax errors and unparseable files: hostile-input probe found and fixed 2 crashes (deeply nested bases, non-UTF-8 file names); size limit; 24 tests in `tests/unit/test_robustness.py`
 - [x] Hand-written fixture projects in `tests/fixtures/` with known correct graphs: 5 projects (`calls_basic`, `shop`, `zoo`, `limits`, `src_layout`), expectations as inline `# =>` markers, exact comparison
-- [ ] **<- NEXT** **Eval harness**: for each eval repo, hand-verify ground truth for ~30-50 symbols (true callers) in YAML; report precision/recall per confidence level
+- [x] Eval harness tooling: seeded stratified edge sampling with source context, label files in `tests/eval/labels/`, `scripts/eval_report.py` (precision with 95% intervals, pinned-commit check, index timings), `scripts/clone_eval_repos.ps1`
+- [ ] **<- NEXT** Run the harness on the 5 pinned repos: clone, sample (about 106 edges per repo), label (Claude, user spot-checks about 10%), generate `docs/eval-report.md`
+- [ ] Recall check: for ~30 symbols per repo, list every text occurrence of the name, label which are true callers, compare with the edges found (changes the old "YAML ground truth" plan; JSON label files are used instead)
 - [ ] `glyphrift index <path>` works end to end
 
-**Exit:** all 5 eval repos index without crashing; eval report exists; `resolved` edges have **>=95% precision** on ground truth (if lower, fix before moving on); index times recorded.
+**Exit:** all 5 eval repos index without crashing; eval report exists (`docs/eval-report.md`); `resolved` edges have **>=95% precision** on ground truth (if lower, fix before moving on); index times recorded.
 
 ## Phase 2: Graph UI (about 2 weeks) FUN
 
