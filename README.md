@@ -2,7 +2,7 @@
 
 > A code graph that is honest about what it knows, and later, a PR checker that judges changes by what they *do*, not how they look.
 
-> **Name status:** GLYPHRIFT finalised Nov 2026. A quick web search found no existing project with this name, but PyPI, GitHub, npm, domain and USPTO were NOT directly verified: check them before publishing. Rejected names: Cartog (existing code-graph tool, github.com/jrollin/cartog), Synterra (active environmental consulting firm of that name).
+> **Name status:** GLYPHRIFT finalised Nov 2026.
 
 ---
 
